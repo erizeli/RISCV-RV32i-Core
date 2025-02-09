@@ -1,0 +1,1 @@
+This project is a digital representation of a RISCV-R32i pipeline processor on SystemVerilog. There are 5 stages: fetch, decode, execute, memory, and writeback. This processor currently supports R and I type instructions.
