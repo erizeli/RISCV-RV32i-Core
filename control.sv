@@ -5,16 +5,6 @@
 `include "memory_io.sv"
 `include "memory.sv"
 
-typedef logic [4:0] regname;
-typedef logic [6:0] opcode;
-typedef logic [2:0] funct3;
-typedef logic [6:0] funct7;
-typedef logic [11:0] i_imm;
-typedef logic [20:0] uj_imm;
-typedef logic [19:0] u_imm;
-typedef logic [4:0] i_store;
-typedef logic [31:0] dat;
-
 module core(
     input logic       clk
     ,input logic      reset
@@ -29,8 +19,8 @@ typedef enum {
     stage_fetch
     ,stage_decode
     ,stage_execute
-   // ,stage_mem
-   //,stage_writeback
+    ,stage_mem
+    ,stage_writeback
 }   stage;
 
 stage   current_stage;
@@ -38,21 +28,31 @@ stage   current_stage;
 opcode inst_code;
 funct3 inst_funct3;
 funct7 inst_funct7;
-i_imm inst_i_imm;
+word imm;
+shamt sham;
 regname rs1;
 regname rs2;
 regname rd;
-dat data1;
-dat data2;
-dat alu_data;
+word data1;
+word data2;
+word write_data;
+word alu_data;
+instr_format format;
 logic write_enable;
-logic [31:0] instruction;
+logic read_enable;
+logic exec_enable;
+logic wb_valid;
+logic memory_stage_complete;
+
+word pc;
+word next_pc;
 
 register_file r (
     .clk(clk), 
     .rst(reset), 
+    .read_enable(read_enable),
     .write_enable(write_enable), 
-    .write_data(alu_data), 
+    .write_data(write_data), 
     .rs1(rs1), 
     .rs2(rs2), 
     .rd(rd), 
@@ -61,45 +61,91 @@ register_file r (
 );
 
 alu a (
+    .enable(exec_enable),
+    .pc(pc),
     .operand_1(data1), 
     .operand_2(data2), 
-    .opcode_t2(inst_code), 
-    .immediate(inst_i_imm), 
+    .opcode_t(inst_code), 
+    .immediate(imm), 
     .function3(inst_funct3), 
     .function7(inst_funct7), 
-    .result(alu_data)
+    .result(alu_data),
+    .next_pc(next_pc)
 );
 
-word    pc;
-always_comb begin
-	case(current_stage) 
-		stage_fetch: begin
-            //$display("%h", inst_mem_rsp.data);
-		    inst_mem_req.addr = pc;
-            inst_mem_req.do_read  = 4'b1111;
-            inst_mem_req.valid = true;
-		end
-        
-		stage_decode: begin
-            inst_code = get_opcode(inst_mem_rsp.data);
-	        inst_funct3 = get_funct3(inst_mem_rsp.data);
-	        inst_funct7 = get_funct7(inst_mem_rsp.data);
-	        inst_i_imm = get_i_imm(inst_mem_rsp.data);
-	        rs1 = get_rs1(inst_mem_rsp.data);
-	        rs2 = get_rs2(inst_mem_rsp.data);
-	        rd = get_rd(inst_mem_rsp.data); 
-			write_enable = zero;
-		end
-		
-		stage_execute: begin
-			write_enable = one;
-		end
-
-        default:
-            $display("Should never get here");
-	endcase	
+instruction latched_instruction;
+always @(posedge clk) begin
+	if (inst_mem_rsp.valid) 
+		latched_instruction <= inst_mem_rsp.data;
 end
 
+instruction fetched_instruction;
+assign fetched_instruction = (inst_mem_rsp.valid) ? inst_mem_rsp.data : latched_instruction;
+
+assign inst_mem_req.addr = pc;
+assign inst_mem_req.valid = inst_mem_rsp.ready && (stage_fetch == current_stage);
+assign inst_mem_req.do_read = (current_stage == stage_fetch) ? 4'b1111 : 0;
+
+assign read_enable = (current_stage == stage_decode) ? true : false;
+assign wb_valid = get_writeback(inst_code);
+
+always_comb begin
+    if (inst_code == q_load || inst_code == q_store) begin
+        if (data_mem_rsp.valid)
+            memory_stage_complete = true;
+        else
+            memory_stage_complete = false;
+    end else
+        memory_stage_complete = true;
+end
+
+assign write_enable = (memory_stage_complete && current_stage == stage_writeback && wb_valid) ? true: false;
+
+always_comb begin
+	inst_code = get_opcode(fetched_instruction);
+	inst_funct3 = get_funct3(fetched_instruction);
+	inst_funct7 = get_funct7(fetched_instruction);
+	rs1 = get_rs1(fetched_instruction);
+	rs2 = get_rs2(fetched_instruction);
+	rd = get_rd(fetched_instruction); 
+	format = get_format(inst_code);
+	imm = get_imm(fetched_instruction, format);
+end
+
+assign exec_enable = (current_stage == stage_execute) ? true : false;
+
+always_comb begin
+    data_mem_req = memory_io_no_req32; //sets default request to invalid
+
+    if (data_mem_rsp.ready && current_stage == stage_mem && (inst_code == q_store || inst_code == q_load)) begin
+        data_mem_req.addr = alu_data[`word_address_size - 1:0];
+        if (inst_code == q_store) begin
+            data_mem_req.valid = true;
+            data_mem_req.do_write = shuffle_store_mask(memory_mask(cast_to_memory_op(inst_funct3)), alu_data);
+            data_mem_req.data = shuffle_store_data(data2, alu_data);
+        end else
+        if (inst_code == q_load) begin
+            data_mem_req.valid = true;
+            data_mem_req.do_read = shuffle_store_mask(memory_mask(cast_to_memory_op(inst_funct3)), alu_data);
+        end
+    end
+end
+
+word load_result;
+always_ff @(posedge clk) begin
+    if (data_mem_rsp.valid)
+        load_result <= data_mem_rsp.data;
+end
+
+always_comb begin
+    if (inst_code == q_load)
+        rd = subset_load_data(
+                    shuffle_load_data(data_mem_rsp.valid ? data_mem_rsp.data : load_result, alu_data),
+                    cast_to_memory_op(inst_funct3));
+    else
+        rd = alu_data;
+
+end
 always @(posedge clk) begin
    if (reset)
       pc <= reset_pc;
@@ -108,23 +154,31 @@ always @(posedge clk) begin
       pc <= pc + 4;
 end
 
-always @(posedge clk) begin
+always_ff @(posedge clk) begin
     if (reset)
         current_stage <= stage_fetch;
     else begin
         case (current_stage)
-            stage_fetch:
-                current_stage <= stage_decode;
-            stage_decode:
+            stage_fetch: begin
+                $display("[FETCH]: pc: %h   instruction: %h", pc, fetched_instruction);
+                if (inst_mem_rsp.valid)
+                    current_stage <= stage_decode;
+            end stage_decode: begin
+                $write("[DECODE]:   ");
+                print_instruction(pc, fetched_instruction, format);
                 current_stage <= stage_execute;
-            stage_execute:
-                current_stage <= stage_fetch;//stage_mem
-           /* stage_mem:
+            end stage_execute: begin
+                $display("[EXECUTE] : result: %d", alu_data);
+                current_stage <= stage_mem;
+            end stage_mem: begin
+                $display("[MEM]");
                 current_stage <= stage_writeback;
-            stage_writeback:
-                current_stage <= stage_fetch; */
-            default: begin
-                $display("Should never get here");
+            end stage_writeback: begin
+                $display("[WB]");
+                if (memory_stage_complete)
+                    current_stage <= stage_fetch;
+            end default: begin
+                $display("[???]");
                 current_stage <= stage_fetch;
             end
         endcase
@@ -133,178 +187,4 @@ end
 
 
 endmodule
-
 `endif
-
-
-typedef enum logic [6:0] {
-	R_ALU = 7'b0110011,
-	I_ALU = 7'b0010011
-} opcode_t;
-
-typedef enum logic[2:0] {
-	ADD_SUB = 3'b000,
-	SLL = 3'b001,
-	SLT = 3'b010,
-	SLTU = 3'b011,
-	XOR = 3'b100,
-	SRL_SRA = 3'b101,
-	OR = 3'b110,
-	AND = 3'b111
-}	funct3_t;
-
-typedef enum logic [6:0] {
-	ADD_SRL = 7'b0000000,
-	SUB_SRA = 7'b0100000
-} funct7_t;
-
-// Helper functions to extract fields
-function regname get_rd(logic [31:0] instr);
-  return instr[11:7];
-endfunction
-
-function regname get_rs1(logic [31:0] instr);
-  return instr[19:15];
-endfunction
-
-function regname get_rs2(logic [31:0] instr);
-  return instr[24:20];
-endfunction
-
-function opcode get_opcode(logic [31:0] instr);
-  return instr[6:0];
-endfunction
-
-function funct3 get_funct3(logic [31:0] instr);
-  return instr[14:12];
-endfunction
-
-function funct7 get_funct7(logic [31:0] instr);
-  return instr[31:25];
-endfunction
-
-function i_imm get_i_imm(logic [31:0] instr);
-    return instr[31:20];
-endfunction
-
-function uj_imm get_uj_imm(logic [31:0] instr);
-    return {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
-endfunction
-
-function u_imm get_u_imm(logic [31:0] instr);
-    return instr[31:12];
-endfunction
-
-function i_store get_i_store(logic [31:0] instr);
-    return instr[24:20];
-endfunction
-
-module register_file(
-	input logic clk,
-	input logic rst,
-	input logic write_enable,
-	input logic [31:0] write_data, //data to write to rd
-	input logic [4:0] rs1, //register address to read from
-	input logic [4:0] rs2, //register address to read from
-	input logic [4:0] rd,  //register address to write to
-	output logic [31:0] read_data1,
-	output logic [31:0] read_data2
-);
-	
-	logic [31:0]registers[4:0];
-	
-	always_ff@(posedge clk) begin
-		if (rst) begin
-			for (int i = 0; i<32; i++)
-				registers[i] = 32'b0;
-		end
-		
-		else if (write_enable & rd != 0) 
-			registers[rd] <= write_data;
-	end
-	
-	always_comb begin
-		read_data1 = registers[rs1];
-		read_data2 = registers[rs2];
-	end
-endmodule
-
-module alu (
-    input dat operand_1,
-    input dat operand_2,
-    input opcode_t opcode_t2,
-    input i_imm immediate,
-    input funct3_t function3,
-    input funct7_t function7,
-    output dat result
-);
-
-    always_comb begin
-        case (opcode_t2)
-            R_ALU: begin
-                case (function3)
-                    ADD_SUB: begin
-                        case (function7)
-                            ADD_SRL: result = operand_1 + operand_2;
-                            SUB_SRA: result = operand_1 - operand_2;
-                            default: result = 32'bx;
-                        endcase
-                    end
-
-                    SLL: result = operand_1 << operand_2[4:0];
-
-                    SLT: result = ($signed(operand_1) < $signed(operand_2)) ? 32'b1 : 32'b0;
-
-                    SLTU: result = (operand_1 < operand_2) ? 32'b1 : 32'b0;
-
-                    XOR: result = operand_1 ^ operand_2;
-
-                    SRL_SRA: begin
-                        case (function7)
-                            ADD_SRL: result = operand_1 >> operand_2[4:0];
-                            SUB_SRA: result = $signed(operand_1) >>> operand_2[4:0];
-                            default: result = 32'bx;
-                        endcase
-                    end
-
-                    OR: result = operand_1 | operand_2;
-
-                    AND: result = operand_1 & operand_2;
-
-                    default: result = 32'bx;
-                endcase
-            end
-
-            I_ALU: begin
-                case (function3)
-                    ADD_SUB: result = operand_1 + $signed(immediate);
-
-                    SLL: result = operand_1 << immediate[4:0];
-
-                    SLT: result = ($signed(operand_1) < $signed(immediate)) ? 32'b1 : 32'b0;
-
-                    SLTU: result = (operand_1 < immediate) ? 32'b1 : 32'b0;
-
-                    XOR: result = operand_1 ^ immediate;
-
-                    SRL_SRA: begin
-                        case (function7)
-                            ADD_SRL: result = operand_1 >> immediate[4:0];
-                            SUB_SRA: result = $signed(operand_1) >>> immediate[4:0];
-                            default: result = 32'bx;
-                        endcase
-                    end
-
-                    OR: result = operand_1 | immediate;
-
-                    AND: result = operand_1 & immediate;
-
-                    default: result = 32'bx;
-                endcase
-            end
-
-            default: result = 32'bx;
-        endcase
-    end
-
-endmodule
