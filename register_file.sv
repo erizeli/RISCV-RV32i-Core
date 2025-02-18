@@ -1,6 +1,7 @@
 module register_file(
 	input logic clk,
 	input logic rst,
+	input logic read_enable,
 	input logic write_enable,
 	input logic [31:0] write_data, //data to write to rd
 	input logic [4:0] rs1, //register address to read from
@@ -10,7 +11,7 @@ module register_file(
 	output logic [31:0] read_data2
 );
 	
-	logic [31:0]registers[4:0];
+	logic [31:0] registers [31:0];
 	
 	always_ff@(posedge clk) begin
 		if (rst) begin
@@ -18,12 +19,12 @@ module register_file(
 				registers[i] = 32'b0;
 		end
 		
+		else if (read_enable) begin
+			read_data1 = registers[rs1];
+			read_data2 = registers[rs2];
+		end
+
 		else if (write_enable & rd != 0) 
 			registers[rd] <= write_data;
-	end
-	
-	always_comb begin
-		read_data1 = registers[rs1];
-		read_data2 = registers[rs2];
 	end
 endmodule
