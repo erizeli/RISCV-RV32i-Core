@@ -1,79 +1,90 @@
 module alu (
-    input data operand_1,
-    input data operand_2,
-    input opcode_t opcode_t2,
-    input i_imm immediate,
+    input logic enable,
+    input logic [31:0] pc,
+    input logic [31:0] operand_1,
+    input logic [31:0] operand_2,
+    input opcode_q opcode_t,
+    input logic [31:0] immediate,
     input funct3_t function3,
     input funct7_t function7,
-    output data result
+    output logic [31:0] result,
+    output logic [31:0] next_pc
 );
-
     always_comb begin
-        case (opcode_t2)
-            opcode_t'R_ALU: begin
-                case (function3)
-                    funct3_t'ADD_SUB: begin
-                        case (function7)
-                            funct7_t'ADD: result = operand_1 + operand_2;
-                            funct7_t'SUB: result = operand_1 - operand_2;
-                            default: result = 32'bx;
-                        endcase
-                    end
+        if (enable) begin
+            next_pc = (opcode_t == q_branch || opcode_t == q_jal || opcode_t == q_jalr) ? pc : pc + 4; // Default case for non-branching instructions
 
-                    funct3_t'SLL: result = operand_1 << operand_2[4:0];
+            case (opcode_t)
 
-                    funct3_t'SLT: result = ($signed(operand_1) < $signed(operand_2)) ? 32'b1 : 32'b0;
+                q_load, q_store: result = operand_1 + $signed(immediate); 
 
-                    funct3_t'SLTU: result = (operand_1 < operand_2) ? 32'b1 : 32'b0;
+                q_op: begin
+                    case (function3)
+                        ADD_SUB: begin
+                            case (function7)
+                                ADD_SRL_BEQ: result = operand_1 + operand_2;
+                                SUB_SRA_BNE: result = operand_1 - operand_2;
+                                default: result = 32'bx;
+                            endcase
+                        end
+                        SLL: result = operand_1 << operand_2[4:0];
+                        SLT: result = ($signed(operand_1) < $signed(operand_2)) ? 32'b1 : 32'b0;  
+                        SLTU: result = (operand_1 < operand_2) ? 32'b1 : 32'b0; 
+                        XOR_BLT: result = operand_1 ^ operand_2;
+                        SRL_SRA_BGE: begin
+                            case (function7)
+                                ADD_SRL: result = operand_1 >> operand_2[4:0]; 
+                                SUB_SRA: result = $signed(operand_1) >>> operand_2[4:0]; 
+                                default: result = 32'bx;
+                            endcase
+                        end
+                        OR_BLTU: result = operand_1 | operand_2;
+                        AND_BGEU: result = operand_1 & operand_2;
+                        default: result = 32'bx;
+                    endcase
+                end
 
-                    funct3_t'XOR: result = operand_1 ^ operand_2;
+                q_op_i: begin
+                    case (function3)
+                        ADD_SUB_BEQ: result = operand_1 + $signed(immediate); 
+                        SLL_BNE: result = operand_1 << immediate[4:0];
+                        SLT: result = ($signed(operand_1) < $signed(immediate)) ? 32'b1 : 32'b0; 
+                        SLTU: result = (operand_1 < immediate) ? 32'b1 : 32'b0; 
+                        XOR_BLT: result = operand_1 ^ immediate;
+                        SRL_SRA_BGE: begin
+                            case (function7)
+                                ADD_SRL: result = operand_1 >> immediate[4:0]; 
+                                SUB_SRA: result = $signed(operand_1) >>> immediate[4:0]; 
+                                default: result = 32'bx;
+                            endcase
+                        end
+                        OR_BLTU: result = operand_1 | immediate;
+                        AND_BGEU: result = operand_1 & immediate;
+                        default: result = 32'bx;
+                    endcase
+                end
 
-                    funct3_t'SRL_SRA: begin
-                        case (function7)
-                            funct7_t'SRL: result = operand_1 >> operand_2[4:0];
-                            funct7_t'SRA: result = $signed(operand_1) >>> operand_2[4:0];
-                            default: result = 32'bx;
-                        endcase
-                    end
+                q_branch: begin
+                    case (function3)
+                        ADD_SUB_BEQ: if (operand_1 == operand_2) next_pc = pc + $signed(immediate);
+                        SLL_BNE: if (operand_1 != operand_2) next_pc = pc + $signed(immediate);
+                        XOR_BLT: if ($signed(operand_1) < $signed(operand_2)) next_pc = pc + $signed(immediate);
+                        SRL_SRA_BGE: if ($signed(operand_1) >= $signed(operand_2)) next_pc = pc + $signed(immediate);
+                        OR_BLTU: if (operand_1 < operand_2) next_pc = pc + immediate;
+                        AND_BGEU: if (operand_1 >= operand_2) next_pc = pc + immediate;
+                        default: next_pc = pc + 4;
+                    endcase
+                end
 
-                    funct3_t'OR: result = operand_1 | operand_2;
+                // Jump instructions
+                q_jal: next_pc = pc + $signed(immediate);
+                q_jalr: next_pc = (operand_1 + $signed(immediate)) & ~32'b1; // Align to even address
 
-                    funct3_t'AND: result = operand_1 & operand_2;
-
-                    default: result = 32'bx;
-                endcase
-            end
-
-            opcode_t'I_ALU: begin
-                case (function3)
-                    funct3_t'ADD_SUB: result = operand_1 + $signed(immediate);
-
-                    funct3_t'SLL: result = operand_1 << immediate[4:0];
-
-                    funct3_t'SLT: result = ($signed(operand_1) < $signed(immediate)) ? 32'b1 : 32'b0;
-
-                    funct3_t'SLTU: result = (operand_1 < immediate) ? 32'b1 : 32'b0;
-
-                    funct3_t'XOR: result = operand_1 ^ immediate;
-
-                    funct3_t'SRL_SRA: begin
-                        case (function7)
-                            funct7_t'SRL: result = operand_1 >> immediate[4:0];
-                            funct7_t'SRA: result = $signed(operand_1) >>> immediate[4:0];
-                            default: result = 32'bx;
-                        endcase
-                    end
-
-                    funct3_t'OR: result = operand_1 | immediate;
-
-                    funct3_t'AND: result = operand_1 & immediate;
-
-                    default: result = 32'bx;
-                endcase
-            end
-
-            default: result = 32'bx;
-        endcase
+                default: result = 32'bx;
+            endcase
+        end else begin
+            result = 32'b0; // Default case when ALU is not enabled
+            next_pc = pc;   // Keep the PC unchanged if ALU is disabled
+        end
     end
-
 endmodule
